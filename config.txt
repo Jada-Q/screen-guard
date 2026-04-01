@@ -4,4 +4,4 @@
 # 语音设置
 # 查看可用语音：python3 screen_guard.py --list-voices
 # 常用选项：Tingting（中文）/ Kyoko（日语）/ Samantha（英文）
-voice = Tingting
+voice = Panpan
