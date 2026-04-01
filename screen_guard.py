@@ -9,7 +9,9 @@ Screen Guard
   nohup python3 screen_guard.py > screen_guard.log 2>&1 &
 """
 
+import argparse
 import ctypes
+import os
 import subprocess
 import sys
 import time
@@ -36,6 +38,17 @@ VOICE               = None      # 自动检测，无需修改
 
 # ── 语音 ────────────────────────────────────────────────────────
 
+def _load_config_voice() -> str | None:
+    """读取同目录 config.txt 中的 voice 设置"""
+    config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.txt")
+    if not os.path.exists(config_path):
+        return None
+    for line in open(config_path, encoding="utf-8"):
+        line = line.strip()
+        if line.startswith("voice") and "=" in line:
+            return line.split("=", 1)[1].strip()
+    return None
+
 def _detect_voice() -> str:
     for v in ("Tingting", "Ting-Ting"):
         r = subprocess.run(["say", "-v", v, ""], capture_output=True)
@@ -43,9 +56,12 @@ def _detect_voice() -> str:
             return v
     return "Alex"  # 最终回退
 
+def _validate_voice(name: str) -> bool:
+    r = subprocess.run(["say", "-v", name, ""], capture_output=True)
+    return r.returncode == 0
+
 def say(text: str):
-    voice = VOICE or "Tingting"
-    subprocess.Popen(["say", "-v", voice, text])
+    subprocess.Popen(["say", "-v", VOICE, text])
 
 BREAK_MESSAGES = [
     "你已经工作了一个小时，该休息一下了。",
@@ -190,7 +206,50 @@ def _fmt(seconds: float) -> str:
 
 def main():
     global VOICE
-    VOICE = _detect_voice()
+
+    parser = argparse.ArgumentParser(description="Screen Guard")
+    parser.add_argument("--voice", help="指定语音名称，例如 --voice Kyoko")
+    parser.add_argument("--list-voices", action="store_true", help="列出常用中文/英文语音")
+    args = parser.parse_args()
+
+    if args.list_voices:
+        print("常用语音（在系统设置 → 辅助功能 → 朗读内容 中可免费下载更多）：")
+        print()
+        voices = [
+            ("Tingting",  "中文（普通话，女声）"),
+            ("Ting-Ting", "中文（普通话，女声，旧版）"),
+            ("Kyoko",     "日语（女声）"),
+            ("Samantha",  "英语（美式，女声）"),
+            ("Daniel",    "英语（英式，男声）"),
+            ("Karen",     "英语（澳式，女声）"),
+            ("Siri",      "Siri 语音（需在系统设置中启用）"),
+        ]
+        for name, desc in voices:
+            ok = "✅" if _validate_voice(name) else "❌ 未安装"
+            print(f"  {ok}  {name:<12} {desc}")
+        print()
+        print("使用方法：python3 screen_guard.py --voice Kyoko")
+        print("或在 config.txt 中写入：voice = Kyoko")
+        return
+
+    # 优先级：命令行 > config.txt > 自动检测
+    if args.voice:
+        if _validate_voice(args.voice):
+            VOICE = args.voice
+        else:
+            print(f"⚠ 语音 '{args.voice}' 不可用，回退到自动检测")
+            VOICE = _detect_voice()
+    else:
+        config_voice = _load_config_voice()
+        if config_voice:
+            if _validate_voice(config_voice):
+                VOICE = config_voice
+            else:
+                print(f"⚠ config.txt 中的语音 '{config_voice}' 不可用，回退到自动检测")
+                VOICE = _detect_voice()
+        else:
+            VOICE = _detect_voice()
+
     _log(f"语音：{VOICE}")
 
     display = DisplayDetector()
