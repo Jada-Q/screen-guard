@@ -11,12 +11,14 @@ Screen Guard
 
 import argparse
 import ctypes
+import json
 import os
+import re
 import subprocess
 import sys
 import time
 import signal
-from datetime import datetime
+from datetime import datetime, date
 from enum import Enum, auto
 
 # ── 配置（可自行修改）────────────────────────────────────────────
@@ -24,6 +26,11 @@ WORK_THRESHOLD      = 60 * 60   # 连续在场多久触发休息提醒（秒）
 REMIND_INTERVAL     = 10 * 60   # 提醒后还未休息，多久再提醒（秒）
 POLL_INTERVAL       = 5         # 主循环轮询间隔（秒）
 LIGHT_REMIND_CD     = 60 * 60   # 开灯提醒冷却时间（秒，每小时最多一次）
+QUIET_START         = 23        # 静音开始时间（23:00 后不提醒）
+QUIET_END           = 7         # 静音结束时间（7:00 后恢复）
+BATTERY_THRESHOLD   = 20        # 低电量阈值（%）
+BATTERY_REMIND_CD   = 30 * 60   # 低电量提醒冷却（秒）
+STATS_PATH          = os.path.expanduser("~/Library/Application Support/ScreenGuard/stats.json")
 
 # 东京日落时间（按月，开始提醒的小时）
 # 冬短夏长，12月最早16点，6-7月最晚19点
@@ -75,7 +82,14 @@ def _validate_voice(name: str) -> bool:
     r = subprocess.run(["say", "-v", name, ""], capture_output=True)
     return r.returncode == 0
 
+def _is_quiet() -> bool:
+    h = datetime.now().hour
+    return h >= QUIET_START or h < QUIET_END
+
 def say(text: str):
+    if _is_quiet():
+        _log(f"🔇 静音时段，跳过提醒：{text}")
+        return
     subprocess.Popen(["say", "-v", VOICE, text])
 
 BREAK_MESSAGES = [
@@ -111,6 +125,44 @@ class DisplayDetector:
 # M4 MacBook 不通过公开 API 暴露环境光传感器原始值；
 # 用时间段判断：18:00-23:00 视为可能光线不足，提醒用户开灯。
 
+# ── 电量检测 ─────────────────────────────────────────────────────
+
+def get_battery() -> tuple:
+    """返回 (电量%, 是否充电)，失败返回 (None, False)"""
+    try:
+        out = subprocess.run(["pmset", "-g", "batt"], capture_output=True, text=True, timeout=3).stdout
+        m = re.search(r"(\d+)%", out)
+        charging = "AC Power" in out or "charging" in out.lower()
+        return (int(m.group(1)) if m else None, charging)
+    except Exception:
+        return None, False
+
+
+# ── 每日专注统计 ──────────────────────────────────────────────────
+
+def _load_stats() -> dict:
+    try:
+        return json.load(open(STATS_PATH, encoding="utf-8")) if os.path.exists(STATS_PATH) else {}
+    except Exception:
+        return {}
+
+def _save_stats(stats: dict):
+    os.makedirs(os.path.dirname(STATS_PATH), exist_ok=True)
+    with open(STATS_PATH, "w", encoding="utf-8") as f:
+        json.dump(stats, f)
+
+def add_focus_seconds(seconds: float):
+    stats = _load_stats()
+    today = str(date.today())
+    stats[today] = stats.get(today, 0) + int(seconds)
+    _save_stats(stats)
+
+def today_focus_str() -> str:
+    secs = _load_stats().get(str(date.today()), 0)
+    h, m = divmod(secs // 60, 60)
+    return f"{h}小时{m}分钟" if h else f"{m}分钟"
+
+
 def is_dim_hours() -> bool:
     now   = datetime.now()
     start = _LIGHT_START_BY_MONTH[now.month]
@@ -134,6 +186,9 @@ class ScreenGuard:
         self.remind_count   = 0
         self.last_light_check   = 0.0
         self.last_light_remind  = 0.0
+        self.last_batt_check    = 0.0
+        self.last_batt_remind   = 0.0
+        self.segment_start      = None   # 当前在场片段开始时间
 
     # ── 主循环 ──
 
@@ -147,6 +202,7 @@ class ScreenGuard:
             now = time.monotonic()
             self._tick_screen(now)
             self._tick_light(now)
+            self._tick_battery(now)
             time.sleep(POLL_INTERVAL)
 
     # ── 屏幕状态 tick ──
@@ -160,28 +216,31 @@ class ScreenGuard:
 
         elif self.state == State.WORKING:
             if not awake:
-                self._enter_break()
+                self._enter_break(now)
             elif now - self.work_start >= WORK_THRESHOLD:
                 self._remind(now)
                 self.state = State.REMINDED
 
         elif self.state == State.REMINDED:
             if not awake:
-                self._enter_break()
+                self._enter_break(now)
             elif now - self.last_reminded >= REMIND_INTERVAL:
                 self._remind(now)
 
     def _enter_working(self, now: float):
-        self.state        = State.WORKING
-        self.work_start   = now
-        self.remind_count = 0
+        self.state         = State.WORKING
+        self.work_start    = now
+        self.segment_start = now
+        self.remind_count  = 0
         self.last_reminded = None
-        elapsed = _fmt(now - self.work_start) if self.work_start else "—"
         _log("▶ WORKING（计时开始）")
 
-    def _enter_break(self):
+    def _enter_break(self, now: float):
+        if self.segment_start:
+            add_focus_seconds(now - self.segment_start)
+            self.segment_start = None
         self.state = State.BREAK
-        _log("⏸ BREAK（屏幕休眠，计时暂停）")
+        _log(f"⏸ BREAK（屏幕休眠）今日专注：{today_focus_str()}")
 
     def _remind(self, now: float):
         msg = BREAK_MESSAGES[self.remind_count % len(BREAK_MESSAGES)]
@@ -190,6 +249,19 @@ class ScreenGuard:
         say(msg)
         elapsed = _fmt(now - self.work_start)
         _log(f"🔔 提醒 #{self.remind_count}（在场 {elapsed}）：{msg}")
+
+    # ── 电量 tick ──
+
+    def _tick_battery(self, now: float):
+        if now - self.last_batt_check < 5 * 60:   # 每5分钟检查一次
+            return
+        self.last_batt_check = now
+        pct, charging = get_battery()
+        if pct is not None and not charging and pct <= BATTERY_THRESHOLD:
+            if now - self.last_batt_remind >= BATTERY_REMIND_CD:
+                self.last_batt_remind = now
+                say("电量不足百分之二十，记得插电，别让工作中断。")
+                _log(f"🔋 低电量提醒（{pct}%）")
 
     # ── 环境光 tick ──
 
