@@ -1,0 +1,2 @@
+# 零第三方依赖
+# 仅使用 macOS 系统框架（CoreGraphics via ctypes）和标准库
