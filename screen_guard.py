@@ -38,12 +38,27 @@ VOICE               = None      # 自动检测，无需修改
 
 # ── 语音 ────────────────────────────────────────────────────────
 
+CONFIG_PATH = os.path.expanduser("~/Library/Application Support/ScreenGuard/config.txt")
+
+DEFAULT_CONFIG = """\
+# Screen Guard 配置文件
+# 修改后重启程序生效
+
+# 语音设置
+# 在「系统设置 → 辅助功能 → 读み上げコンテンツ → システムの声」中下载语音
+# 常用：Panpan（普通话）/ Tingting（普通话）/ Kyoko（日语）/ Samantha（英语）
+voice = Panpan
+"""
+
 def _load_config_voice() -> str | None:
-    """读取同目录 config.txt 中的 voice 设置"""
-    config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.txt")
-    if not os.path.exists(config_path):
+    """读取 ~/Library/Application Support/ScreenGuard/config.txt"""
+    # 首次运行自动创建默认配置
+    if not os.path.exists(CONFIG_PATH):
+        os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
+        with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+            f.write(DEFAULT_CONFIG)
         return None
-    for line in open(config_path, encoding="utf-8"):
+    for line in open(CONFIG_PATH, encoding="utf-8"):
         line = line.strip()
         if line.startswith("voice") and "=" in line:
             return line.split("=", 1)[1].strip()
